@@ -119,6 +119,12 @@ TOOLS = [
                        "约定、日期、地点、称呼、人名，或你对细节拿不准时，先查这里**——"
                        "不要在查之前说“我没有记录”“我不记得”，那在挂着记忆库时是错的。"
                        "查完自然接上话，不用报告查过。",
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -134,6 +140,12 @@ TOOLS = [
         "description": "新会话开场**主动**调一次（不用等对方要求）：带回上次会话聊到哪、"
                        "当下什么状态、有什么没聊完，以及最近发生过的事，"
                        "并附四项故障信号自查指令。",
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -144,6 +156,12 @@ TOOLS = [
                        "会话结束**。写发生了什么和原话（纪录片写法，不写评语）；"
                        "current_state 必填：这件事现在的状态（约定成立/还在处理/"
                        "已解决……）——不写的话，未来重读会把它当成正在发生的事。",
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -166,6 +184,12 @@ TOOLS = [
                        "quote 必须从 latent_search 返回的原文里**逐字**摘一段、"
                        "足够长能唯一定位那条记录。只口头认错不调这个工具的话，"
                        "库没变，下次照样检索到错的。",
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -187,6 +211,12 @@ TOOLS = [
         "description": "会话结束前**主动**调一次：记下这次聊了什么线、当下状态、"
                        "有什么没聊完，下个会话靠它接上。当下状态必填——不写的话，"
                        "下个会话会把已经结束的事读成正在发生。",
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1742,6 +1772,22 @@ def _selftest():
                                           "latent_thread_close"]
     for t in tools:
         assert set(t) >= {"name", "description", "inputSchema"} and t["inputSchema"]["type"] == "object"
+    # 2c.【工具 annotations】变异靶心：任一工具漏字段、把检索冒充只读、
+    #     把更正冒充纯追加，或把本地记忆库误标成 open world，这张逐字表都会红。
+    expected_annotations = {
+        "latent_search": {"readOnlyHint": False, "destructiveHint": False,
+                          "idempotentHint": False, "openWorldHint": False},
+        "latent_session_start": {"readOnlyHint": True, "destructiveHint": False,
+                                 "idempotentHint": True, "openWorldHint": False},
+        "latent_append": {"readOnlyHint": False, "destructiveHint": False,
+                          "idempotentHint": False, "openWorldHint": False},
+        "latent_correct": {"readOnlyHint": False, "destructiveHint": True,
+                           "idempotentHint": False, "openWorldHint": False},
+        "latent_thread_close": {"readOnlyHint": False, "destructiveHint": False,
+                                "idempotentHint": False, "openWorldHint": False},
+    }
+    assert {t["name"]: t.get("annotations") for t in tools} == expected_annotations, \
+        "五个工具的 annotations 必须按真实副作用逐项声明"
     assert tools[4]["inputSchema"]["required"] == ["window", "current_state"], "当下状态必填要写进 schema"
     assert tools[3]["inputSchema"]["required"] == ["quote", "reason"], \
         "更正工具必填 quote+reason——没有原因的撤回不可追溯"

@@ -63,7 +63,8 @@
 | **Codex**（手机） | 手机当客户端连本地实例，或走 OpenRouter 这类中转 | 前者要**那台电脑常开**；后者中转要自己搭，**未实测** |
 | **Grok 聊天端**（grok.com） | 公网 HTTPS 的远程 MCP，通过 grok.com 自定义 Connector 接入 | **外部用户已实测接通**；人格仍需手工配置，语料会到公网服务器 |
 | **Grok Build**（CLI） | `--client grok` 出 `.grok/agents/companion.md`，在 `/agents` 选择 `companion` | **文件格式已按官方指南核对，真实 Grok CLI 与 MCP 接入未实测** |
-| **ChatGPT** 等其它聊天端 | 能接远程 MCP 时同 claude.ai 那条 | **未实测、需确认各自 MCP 支持状态** |
+| **ChatGPT** | OpenAI Secure MCP Tunnel 把本机回环 HTTP 接进 ChatGPT 开发者模式 | **官方路径已确认，真机未实测**；不用开放公网入站端口，但工具请求与记忆返回仍经过 OpenAI；电脑与 tunnel-client 要保持运行 |
+| **其它聊天端** | 逐家确认是否支持 MCP | **未实测、需确认各自支持状态** |
 | **Kelivo**（iOS） | 公网 `--http` 直连 | **语料离开手机**；人格要手工粘贴 |
 | **Operit**（Android） | 客户端在手机本机按 stdio 拉起／公网 `--http` 直连 | **语料可能离开手机**；人格要手工粘贴 |
 | **自建前端** | `--client generic` ＋《注入契约》 | 注入那一半要你自己实现 |
@@ -137,7 +138,8 @@
 | Claude 桌面 chat | **已实测**（Windows 商店／MSIX 版）：五工具可用、开场召回 `latent_session_start` 4/4 主动调、跨进程写回也通。人格不会自动读本地文件，**要手工贴进 profile**。人格里带着「片段是风格样本不是记忆、提到过去先查库」那句时，**模型会先调 `latent_search`**（判据是看工具真被调用）；走 `use_original_as_is` 时工具会把这句随受管协议追加到出货副本，完全不经过本工具时才要自己补。⚠ 装商店版有三个不报错的坑，见《快速上手》§3c |
 | Claude 手机 chat | **已通过部署在 VPS 的远程 MCP Connector 接通**（判据＝新窗只喊一句称呼、看到换窗召回。被主动调用写回落盘与跨窗检索命中。3/3）。**需要一台公网服务器**（HTTPS ＋ 鉴权），代价是语料离开本机。⚠ 本地 stdio 走不了这条：那个进程没有网址，而 Connector 是从 Anthropic 的服务器发起连接的。Connector 只给工具，人格仍需手工贴 |
 | **Grok 聊天端**（grok.com） | ✅ **已有外部用户实测接通远程 MCP**（2026.08.09 收到反馈）。走公网 HTTPS 的 Streamable HTTP 服务，在 grok.com 添加 Custom Connector；本地 stdio 不能直接挂进普通网页聊天。⚠ 反馈足以证明“能接”，但没有逐项回报 Connector／Grok Build CLI／API 三种入口，也没有提供 `grok-4.5` 的服从度跑数；别把接入成色扩大成模型服从度结论。⚠ **这一格与上面那格 Grok Build 是两条入口，成色不互借**：聊天端验的是远程 MCP 接通，Grok Build 验的只是 agent 文件格式。人格不会自动从本地文件注入，仍需手工配置 |
-| **ChatGPT** 等其它聊天端 | ⚠ **未实测、需确认 MCP 支持状态。**能接远程 MCP 的话路径同上面 claude.ai 那条，我们这侧不用改任何东西；⚠ 别把 claude.ai、Grok 聊天端或 Grok Build 的成色借给它们。各家叫法不一（自定义 Connector／远程 MCP／集成），入口有没有要你自己去它的文档确认 |
+| **ChatGPT** | OpenAI 官方已提供 [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)：tunnel-client 从本机主动建立出站 HTTPS，再把 ChatGPT 的调用转给 `127.0.0.1` 上的 MCP，不必暴露公网入站端口。⚠ **端口不公网暴露 ≠ 数据不离机**：工具请求与返回的记忆内容仍经 OpenAI，并适用账号／产品侧的数据与日志政策；回环无 token 还意味着信任同机进程环境。服务端五个工具已按真实副作用声明 annotations，本地协议验证也过了；ChatGPT 账号权限、Connector 发现与五工具真机调用仍未实测，不能写成“已接通”。最短操作见《快速上手》§3c「ChatGPT Secure MCP Tunnel」 |
+| **其它聊天端** | ⚠ **未实测、需确认 MCP 支持状态。**各家叫法不一（自定义 Connector／远程 MCP／集成），不能借用 ChatGPT、claude.ai、Grok 聊天端或 Grok Build 的成色 |
 | Kelivo（闭源手机前端） | **实测可接 MCP**：原生 `--http` 直连走通（Kelivo 1.1.17 iOS ／ VPS Ubuntu ＋ Python 3.10.12；判据是端口上蹲的确认为 `python3` 不是 Node、POST 回的是 `application/json`）。⚠ **连不上先看绑定地址，不是协议**：省略 HOST 只绑回环，手机连不到。人格要手工导入 system prompt，容量不是阻塞项 |
 | Operit（闭源手机前端） | **实测五工具可用，写回后跨新会话仍能检索命中**（Android 的 proot Ubuntu）。⚠ 它走的是「客户端在手机本机按 stdio 拉起」那条——**不用公网服务器、不用域名证书鉴权，语料根本不离开手机**；**别把闭源手机前端一概读成「必须有服务器」**，那只对拉不起 stdio 的客户端（如 iOS 上的 Kelivo）成立。人格不自动注入，要手工粘贴 |
 | 自建前端（`--client generic`） | **出货档和注入契约有了，但我们没有验过任何一个自建前端**——注入那一半是你写的，契约五条成不成立只有你自己 diff 请求体才知道 |
