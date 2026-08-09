@@ -49,7 +49,9 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
+import sys
 import tempfile
 import time
 from collections import Counter, defaultdict
@@ -1255,8 +1257,10 @@ def append_record(corpus_dir, text, current_state, window=None, now=None,
     真机事故，任务卡"写回时区与跨日归窗"）：原先这里是裸的
     `datetime.fromtimestamp(now)`，UTC 的 VPS ＋ 东八区的用户，凌晨 00:00～07:59 的
     写回稳定记成前一天，而错误日期同时进文件名、H1、H2、检索标签，重启后还会被
-    当成最高优先级的排序信号。`time_context` 不传时退宿主本地时区（兼容旧调用），
-    但服务端起动路径一律显式传，`--doctor` 会把"没配"报成 WARN。
+    当成最高优先级的排序信号。`time_context` 不传时退 `TimeContext.default()`
+    ——那是**东八区**（2026.08.05 维护者拍板），**不跟宿主本地时区走**：跟着机器变
+    的错法换台机器就换个答案，且换的时候不报错。服务端起动路径与 `--append` 那条
+    CLI 一律显式传，没显式配时 `--doctor` 报 WARN、CLI 在 stderr 打 ⚠。
 
     每条记录同时落一行**带 UTC offset 的 ISO 8601 精确时刻**（HTML 注释，渲染后
     不可见）：Markdown 正文只有"某日"，重启后精确写入时刻不可恢复，排序就只能从
@@ -2138,6 +2142,103 @@ def _selftest(embed=False):
         assert m18c["timestamp_source"] == "filename", \
             f"没有记录级标记的块不该被这条新规则碰到：{m18c['timestamp_source']}"
 
+    # 19.【--append 那条 CLI·必须走真进程】（任务卡"append独立CLI"判据 1～7、9）
+    #    ⚠ **这一项不许改成进程内直接调 append_record**：那样喂进去的是我们自己构造的
+    #    TimeContext，**够不着"CLI 上那个值有没有真的接上"**——同一个形状 mcp_server.py
+    #    第 20 项注释里记过一次，这里是第二次踩同一条线，所以照它的办法起真进程。
+    import subprocess
+    _cli = [sys.executable, str(Path(__file__).resolve())]
+
+    def _run_cli(*argv, env=None):
+        e = dict(os.environ)
+        e.pop("MEMORY_TIMEZONE", None)      # 宿主环境变量会串味，逐次清干净
+        e.update(env or {})
+        p = subprocess.run(_cli + list(argv), capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", env=e, timeout=60)
+        return p.returncode, p.stdout, p.stderr
+
+    with tempfile.TemporaryDirectory() as td19:
+        #  a) 空目录写第一条：退 0、文件建出来、正文与当下状态都落盘
+        code, out, err = _run_cli("--corpus", td19, "--append", "她把琴修好了",
+                                  "--state", "已兑现")
+        assert code == 0, f"判据 1：正常写回该退 0，实际 {code}\n{err}"
+        made = sorted(Path(td19, "timeline").glob("window_*.md"))
+        assert len(made) == 1, f"判据 1：该建出一个窗口文件，实际 {[p.name for p in made]}"
+        assert "第 1 个窗口" in out and made[0].name in out, f"判据 1：stdout 要说清落点：{out}"
+        body19 = made[0].read_text(encoding="utf-8")
+        assert "她把琴修好了" in body19 and "当下状态：已兑现" in body19
+
+        #  b) 同一自然日再写一条 → 追加进同一个文件，不新开窗口
+        code, out, _ = _run_cli("--corpus", td19, "--append", "琴弦也换了新的",
+                                "--state", "已兑现")
+        assert code == 0 and len(list(Path(td19, "timeline").glob("window_*.md"))) == 1, \
+            f"判据 2：同一天该归同一个窗口，实际 {out}"
+        assert "琴弦也换了新的" in made[0].read_text(encoding="utf-8")
+
+        #  c) 依赖参数缺失一律非零退出——⚠ 写回是有副作用的操作，"打帮助然后退 0"
+        #     会让调用方以为记下了
+        code, _, err = _run_cli("--corpus", td19, "--append", "没写状态的一条")
+        assert code != 0 and "当下状态必填" in err, f"判据 3：{code} / {err}"
+        code, _, err = _run_cli("--append", "没给语料目录的一条", "--state", "在办")
+        assert code != 0 and "--corpus" in err, f"判据 4：{code} / {err}"
+        assert "没写状态的一条" not in "".join(
+            p.read_text(encoding="utf-8") for p in Path(td19, "timeline").glob("*.md")), \
+            "判据 3：被拒的那条一个字都不该落盘"
+
+        #  d) 非法时区名必须非零退出，**不静默退默认档**（静默退回去就是把
+        #     "写回时区与跨日归窗"那张卡修的缺陷原样留回来）
+        code, _, err = _run_cli("--corpus", td19, "--append", "时区写错的一条",
+                                "--state", "在办", "--timezone", "Asia/Shenzhen")
+        assert code != 0 and "认不出这个时区名" in err, f"判据 5：{code} / {err}"
+
+        #  e)【变异靶心：CLI 那个时区值有没有真的接上】取两个**相差 25 小时**的固定
+        #     偏移，两边的自然日在任何时刻都不可能相同——所以这条断言不挑运行时刻。
+        #     ⚠ 变异：把 __main__ 里传给 append_record 的 `time_context=tc` 去掉 →
+        #     两边都退默认的东八区、日期变成同一天 → 这条立刻转红
+        far_e, far_w = "UTC+14:00", "UTC-11:00"
+        dates19 = []
+        for zone in (far_e, far_w):
+            t_before = time.time()
+            sub = Path(td19, "tz" + zone.replace(":", "").replace("+", "p").replace("-", "m"))
+            code, out, err = _run_cli("--corpus", str(sub), "--append", "同一时刻，两个时区",
+                                      "--state", "记完了", "--timezone", zone)
+            assert code == 0, f"判据 6：{zone} 该能写，实际 {code}\n{err}"
+            assert "⚠" not in err, f"判据 6：显式配了时区就不该报 ⚠：{err}"
+            f19 = next(iter(Path(sub, "timeline").glob("window_*.md")))
+            dates19.append(f19.stem.split("_")[-1])       # window_01_YYYY-MM-DD
+            assert f"## {dates19[-1]} 记" in f19.read_text(encoding="utf-8"), \
+                "判据 6：H2 的日期要跟文件名同一个口径"
+            assert zone in out, f"判据 6：回执要说清按哪个时区算的：{out}"
+            #  跟**本进程独立算出来的**自然日比，不只是比"两边不一样"：子进程跑在
+            #  t_before～现在之间，所以两端各算一个，落在里面就算对
+            want19 = {TimeContext(zone).local_date(t) for t in (t_before, time.time())}
+            assert dates19[-1] in want19, \
+                f"判据 6：{zone} 下该归到 {sorted(want19)}，实际 {dates19[-1]}"
+        assert dates19[0] != dates19[1], \
+            f"判据 6：相差 25 小时的两个时区不可能是同一个自然日，实际都是 {dates19[0]}"
+
+        #  f) 没显式配时区：默认档的错法要"固定且可读"（2026.08.05 拍板），
+        #     可读的前提是**真的打出来**——所以 stderr 必须有 ⚠ 且写出在用哪个时区
+        sub19 = Path(td19, "noTZ")
+        code, out, err = _run_cli("--corpus", str(sub19), "--append", "没配时区的一条",
+                                  "--state", "在办")
+        assert code == 0 and "⚠" in err and "没配 --timezone" in err, \
+            f"判据 6：没配时区要报 ⚠，实际 {code} / {err}"
+        assert TimeContext.default().name in err, f"判据 6：⚠ 要写出实际在用的时区：{err}"
+        #     环境变量这条兜底也要真的接上（口径同 mcp_server 的 MEMORY_TIMEZONE）
+        code, out, err = _run_cli("--corpus", str(Path(td19, "envTZ")), "--append",
+                                  "走环境变量的一条", "--state", "在办",
+                                  env={"MEMORY_TIMEZONE": far_e})
+        assert code == 0 and "⚠" not in err and far_e in out, f"判据 6：{out} / {err}"
+
+        #  g)【无服务进程也能查到】CLI 的使用场景就是"还没接通 MCP"那一刻，
+        #     所以它不重建索引也不碰账本（任务卡岔口二）——下次 load_corpus 从盘读即可
+        idx19 = load_corpus(td19)
+        assert any("她把琴修好了" in c for c in idx19.chunks), \
+            "判据 7：CLI 写下的内容，重新加载语料后必须检索得到"
+        hit19 = idx19.retrieve("琴修好了吗", topN=3)
+        assert hit19 and any("琴" in r["text"] for r in hit19), f"判据 7：{hit19}"
+
     print("selftest ok" + ("（含真embedding路径）" if embed else "（零依赖）"))
 
 
@@ -2169,9 +2270,54 @@ if __name__ == "__main__":
     ap.add_argument("--corpus", help="md 语料目录")
     ap.add_argument("--query", help="检索词")
     ap.add_argument("--topN", type=int, default=5)
+    # 写回那支笔的命令行入口（任务卡"append独立CLI"）：给"还没接通 MCP"的那一刻用
+    # ——记忆库刚建起来时，唯一的写入口本来是模型调 latent_append，人在终端上只能
+    # 手搓 timeline 里的 md，而文件名日期是 parse_chunk_timestamp 的最高优先级来源，
+    # ⚠ 手搓写歪不报错、只在以后检索排序时静默错位
+    ap.add_argument("--append", metavar="正文",
+                    help="往语料目录追加一条记忆（要跟 --corpus、--state 一起用）。"
+                         "⚠ 已知边界：与常驻服务同时写同一个窗口文件时没有文件锁，"
+                         "读改写不是原子的；当前按单人单机场景使用")
+    ap.add_argument("--state", metavar="当下状态",
+                    help="这件事现在是什么状态（--append 必填，同 latent_append 的病灶"
+                         "迁移规则：没有状态的记录，未来重读会被当成正在发生的事）")
+    ap.add_argument("--window", type=int,
+                    help="显式指定窗口号（默认按“现有最大值 +1、同一自然日归同窗”）")
+    ap.add_argument("--timezone", metavar="IANA名",
+                    help="记忆所有者的时区（例如 Asia/Shanghai），也可用环境变量 "
+                         "MEMORY_TIMEZONE；口径与 mcp_server.py 的同名参数一致。"
+                         "⚠ 不配就用默认的东八区并在 stderr 报 ⚠——不在东八区一定要配，"
+                         "否则写下的记忆日期会静默错一天")
     args = ap.parse_args()
     if args.selftest:
         _selftest(embed=args.embed)
+    elif args.append is not None:
+        # 依赖参数缺失一律 ap.error() 非零退出：写回是有副作用的操作，
+        # "打个帮助然后退 0"会让脚本以为记下了
+        if not args.corpus:
+            ap.error("--append 要跟 --corpus 一起用：写进哪个语料目录")
+        if not args.state:
+            ap.error("--append 要跟 --state 一起用：当下状态必填（病灶迁移）")
+        # 时区口径逐条照抄 mcp_server.py 的 --timezone，不另设一套写法：
+        # 同一份记忆库两个写入口两套规则，比没有这个 CLI 更难排查
+        tz_name = args.timezone or os.environ.get("MEMORY_TIMEZONE") or ""
+        try:
+            tc = TimeContext(tz_name.strip()) if tz_name.strip() else TimeContext.default()
+        except ValueError as e:
+            ap.error(str(e))          # ⚠ 非法时区名非零退出，不静默退默认档
+        if not tc.explicit:
+            # 默认档的错法是"固定且可读"的（2026.08.05 拍板），可读的前提是真的打出来
+            print(f"⚠ 没配 --timezone，按默认的 {tc.name}（东八区）算自然日；"
+                  "不在东八区的话写下的日期会错一天", file=sys.stderr)
+        try:
+            path, _, meta = append_record(args.corpus, args.append, args.state,
+                                          window=args.window, time_context=tc)
+        except (ValueError, OSError) as e:
+            ap.error(str(e))
+        # 不重建索引、不碰权重与撤回账本（任务卡岔口二）：CLI 用在没有服务进程的时候，
+        # 而已经起着的服务两种形态都会自己发现新文件（stdio 每次调用重读语料、
+        # HTTP 常驻检测到语料变化从盘重读）——CLI 去写账本反而跟常驻进程的内存态打架
+        print(f"已写进第 {meta['window']} 个窗口（{path.name}），时区 {meta['timezone']}。")
     elif args.corpus and args.query:
         run(args.corpus, args.query, args.topN, embed=args.embed,
             provider_spec=args.embed_provider)
