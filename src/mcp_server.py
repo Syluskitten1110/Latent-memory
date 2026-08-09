@@ -1540,8 +1540,13 @@ def startup_failure_report(stage, exc, *, embed=False, http_bind=None, log_path=
     重排会让别处对「②」的引用悄悄指向另一条。）
 
     返回一段多行文本，第一行是人话、第二行是出口，末行指向落盘的完整堆栈。"""
-    if stage == "bind" and isinstance(exc, OSError) and exc.errno == errno.EADDRINUSE:
-        why = f"要监听的地址已经被别的进程占着，起不来（{http_bind}）。"
+    bind_unavailable = (
+        stage == "bind" and isinstance(exc, OSError) and
+        (exc.errno == errno.EADDRINUSE or getattr(exc, "winerror", None) == 10013)
+    )
+    if bind_unavailable:
+        why = (f"要监听的地址已经被别的进程占着，或被 Windows 保留，"
+               f"起不来（{http_bind}）。")
         how = ("出口：换一个端口重起（例如 --http 127.0.0.1:8766），"
                "或者先把占着这个端口的进程停掉再重起"
                "（Linux/macOS：lsof -i :<端口>；Windows：netstat -ano | findstr :<端口>）。")
@@ -3167,7 +3172,9 @@ def _selftest():
 
         #    a) 表里第 3 条：`--http` 端口被占。**真占一个端口**，不是模拟异常。
         squat21 = _socket21.socket()
-        squat21.setsockopt(_socket21.SOL_SOCKET, _socket21.SO_REUSEADDR, 1)
+        # ⚠ 不许给占位 socket 开 SO_REUSEADDR：Windows 会允许
+        # ThreadingHTTPServer 再绑同一端口，子进程真启动后卡在 serve_forever，
+        # 夹具最终只会报 90 秒超时，根本没走到「端口被占」错误出口。
         squat21.bind(("127.0.0.1", 0))
         squat21.listen(1)
         busy_port21 = squat21.getsockname()[1]
