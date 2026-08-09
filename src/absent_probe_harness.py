@@ -75,16 +75,19 @@ ABSENT_PROBES = [
 ]
 
 
-def run_probes(chunks, probes, embed=False, verbose=True):
+def run_probes(chunks, probes, embed=False, verbose=True, index=None):
     """跑一轮探针，返回 (正确空手数, 计分数, 被护栏拦下数, 明细)。
 
-    明细每项：(状态, 问题, 附加信息)，状态 ∈ {"SKIP", "EMPTY", "LEAK"}。"""
+    明细每项：(状态, 问题, 附加信息)，状态 ∈ {"SKIP", "EMPTY", "LEAK"}。
+    `index` 供判据实验传入已接好外部表的索引；不给时维持原来的建库路径。"""
     alltext = "\n".join(chunks)
 
-    idx = MemoryIndex(embed=embed)
-    for c in chunks:
-        idx.add(c, {})
-    idx.build()
+    idx = index
+    if idx is None:
+        idx = MemoryIndex(embed=embed)
+        for c in chunks:
+            idx.add(c, {})
+        idx.build()
 
     cap = idx._distinctive_df()        # 问闸本人，不抄它的判据
     dfs = idx._bm25.df                 # 读闸看到的那份 df，不自己重扫

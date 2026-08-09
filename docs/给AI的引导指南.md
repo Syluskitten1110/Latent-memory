@@ -168,10 +168,21 @@ CLI、API 三种入口逐项挂账，也没有跑《注入契约》里 `grok-4.5
 “还没测”，**不要把接入成功写成模型服从度已验证。**人格也不会自动从本地文件注入，
 要放进 Grok 自定义指令，并写明新会话先调 `latent_session_start`、回忆前先调 `latent_search`。
 
-#### ChatGPT ／其它 AI 聊天端 → **未实测、需确认 MCP 支持状态**
+#### ChatGPT → **官方 Secure MCP Tunnel 路径已确认，真机未实测**
 
-能接远程 MCP 时路径形状同上，但这些客户端我们没验过；别拿 claude.ai 或 Grok 的成色
-借给它们。入口叫法不一（自定义 Connector／远程 MCP／集成），让 TA 去各自文档或设置确认。
+不要再把 ChatGPT 说成“需确认是否支持 MCP”。OpenAI 官方 Secure MCP Tunnel 可以由本机
+tunnel-client 主动建立出站 HTTPS，把 ChatGPT 请求转给 `127.0.0.1` 上的 MCP；不用把记忆库
+开放成公网入站服务。⚠ 这不等于数据不离机：工具请求与记忆返回仍经过 OpenAI；快速上手里的
+回环无 token 路径还意味着信任同机进程环境。带 TA 按《快速上手》§3c「ChatGPT Secure MCP Tunnel」走 init／doctor／run，
+tunnel ID 与运行时 key 只从 OpenAI Platform 原始页面取，**不写入仓库或聊天记录**。
+
+⚠ 这只是官方路径与服务端成色：本项目尚无 ChatGPT 账号侧 Connector 发现、五工具调用或
+换窗写回证据，所以只能说“官方路径已确认、真机未实测”，不能说“ChatGPT 已接通”。
+
+#### 其它 AI 聊天端 → **未实测、需确认 MCP 支持状态**
+
+别拿 ChatGPT、claude.ai 或 Grok 的成色借给其它客户端。入口叫法不一（自定义 Connector／
+远程 MCP／集成），让 TA 去各自文档或设置确认。
 
 ---
 
