@@ -253,7 +253,8 @@ class MemoryServer:
         self.index = index if index is not None else MemoryIndex().build()
         self.thread_store = thread_store if thread_store is not None else ThreadStore()
         self.search_topN = search_topN
-        # 时区：没传就退宿主本地时区（兼容旧配置），但 --doctor 会报 WARN。
+        # 时区：没传就退 TimeContext.default()（东八区，**不跟宿主本地时区走**），
+        # 但 --doctor 会报 WARN。
         # ⚠ 这一份要穿到三处——写回算自然日、召回标日期、检索结果标日期，
         # 少接一处就会出现"当场对、重启错"或"文件对、标签错"的半拉形态
         self.time_context = time_context if time_context is not None else TimeContext.default()
