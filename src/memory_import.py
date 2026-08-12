@@ -70,7 +70,7 @@ import re
 import sys
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # 同目录模块，import 不触发其 CLI
@@ -104,6 +104,74 @@ class MemoryEntry:
     timestamp_source: str = ""
 
 
+# ---------- 时间戳解析：两条 json 翻译器共用 ----------
+
+def _iso_ts(s):
+    """ISO8601 → epoch 秒；解析不了返回 None 不抛（时间戳缺失下游本来就有兜底）。
+    ⚠ **只认 ISO 字符串**——数字 epoch 走 `_epoch_ts()`，两条一起走 `_any_ts()`。"""
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+# 秒档与毫秒档的分界（2026.08.12 补，缘由见 _epoch_ts 的 docstring）。
+# **不是拍的，是算出来的**：1e8 秒与 1e11 毫秒是同一个时刻——1973-03-03；
+# 1e11 秒与 1e14 毫秒也是同一个时刻——5138 年。于是
+#   [1e8, 1e11)  这个区间里，只有"秒"能表示 1973～5138 年之间的真实时刻；
+#   [1e11, 1e14) 这个区间里，只有"毫秒"能。
+# **两档不重叠，所以判档无歧义**，不需要另外猜一个"看着像哪个"的阈值。
+# 区间之外一律 None：不猜。1973 年之前的聊天导出不存在，5138 年之后的也不存在，
+# 落在外面的数只说明它压根不是这两种 epoch，硬认才是编。
+_EPOCH_SEC_MIN = 1e8      # 1973-03-03，秒档下界
+_EPOCH_MS_MIN = 1e11      # 1973-03-03，毫秒档下界＝秒档上界
+_EPOCH_MS_MAX = 1e14      # 5138 年，毫秒档上界
+
+
+def _epoch_ts(v):
+    """数字 epoch（秒或毫秒，数值或纯数字字符串）→ epoch 秒；认不出返回 None。
+
+    **这个函数是 2026.08.12 一位外部用户的事故逼出来的**：她的转换脚本只解 ISO
+    字符串，而导出源 58 个窗口里有 48 个是 **13 位毫秒时间戳**，
+    全部掉进一个空的 `except` 变成 `unknown`——于是 **97.9% 的块只能退到 mtime**，
+    换窗召回的新鲜度排序整个失效，**而全程零报错**。
+    ⚠ 她栽的是她自己的脚本，但**我们 `_iso_ts()` 是同一个形状**：数字进来
+    `AttributeError` → None → 下游兜 mtime → 标「时间未知」，一样不出声。
+    那次她那边是人查出来的；我们这边没有已知触发路径，只是**没被踩到而已**。
+
+    ⚠ **判档规则见上面三个常数的注释——分界是算出来的，不许改成"看位数"**：
+    "13 位是毫秒、10 位是秒"这种说法在 1973 年之前和 5138 年之后都会错，
+    而且它把"多长"当成了判据，真正的判据是"这个数落在哪一档的可表示区间里"。
+
+    ⚠ **区间之外返回 None，跟改之前一样**——这个函数扩的是"认得出的形状"，
+    不是"什么都认"。认不出时仍然是静默 None（下游 mtime 兜底照旧），
+    **出声那一半交给 `--doctor` 的时间戳成色那格**（那里能看到全库比例，
+    单条转换看不到——一条转不出来是正常的，九成七转不出来才是事故）。"""
+    if isinstance(v, bool):     # bool 是 int 的子类，True 会被当成 1
+        return None
+    if isinstance(v, str):
+        try:
+            v = float(v.strip())
+        except (ValueError, AttributeError):
+            return None
+    if not isinstance(v, (int, float)):
+        return None
+    v = float(v)
+    if _EPOCH_SEC_MIN <= v < _EPOCH_MS_MIN:
+        return v
+    if _EPOCH_MS_MIN <= v < _EPOCH_MS_MAX:
+        return v / 1000.0
+    return None
+
+
+def _any_ts(v):
+    """导出文件里的时间字段 → epoch 秒；ISO 字符串与数字 epoch 都认，认不出 None。
+
+    取值顺序是 ISO 优先：ISO 串里带时区信息，比裸数字多一份依据；
+    而纯数字字符串 `fromisoformat` 本来就解不了，不会互相抢。"""
+    return _iso_ts(v) if _iso_ts(v) is not None else _epoch_ts(v)
+
+
 # ---------- 翻译器一：ChatGPT conversations.json ----------
 
 def _chatgpt_conv_entries(conv):
@@ -132,7 +200,12 @@ def _chatgpt_conv_entries(conv):
         text = "\n".join(p for p in parts if isinstance(p, str)).strip()
         if not text:
             continue
-        out.append(MemoryEntry(text=text, speaker=msg["author"]["role"], timestamp=msg.get("create_time"),
+        # ⚠ **这里必须走 _any_ts，不许退回裸取 `create_time`**：裸取比"只认 ISO"更敞——
+        # 那种认不出至少还归 None，裸取是**原样端进 MemoryEntry 当秒用**，
+        # 真喂进来一个毫秒戳，得到的是 5 万年后的日期，而它会一路排到全库最前面。
+        # 走 _any_ts 之后：秒照旧、毫秒换算、认不出归 None（跟没有时间戳同待遇）。
+        out.append(MemoryEntry(text=text, speaker=msg["author"]["role"],
+                               timestamp=_any_ts(msg.get("create_time")),
                                tags=("chatgpt", title) if title else ("chatgpt",)))
     return out
 
@@ -147,14 +220,6 @@ def parse_chatgpt_export(data):
 
 # ---------- 翻译器二：Claude 导出 json ----------
 
-def _iso_ts(s):
-    """ISO8601 → epoch 秒；解析不了返回 None 不抛（时间戳缺失下游本来就有兜底）。"""
-    try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
-    except (ValueError, AttributeError, TypeError):
-        return None
-
-
 def parse_claude_export(data):
     """Claude 导出（单个对话 dict 或列表，chat_messages 结构）→ [MemoryEntry]。
     sender 的 human 归一成 user，跟 ChatGPT 翻译器出口一致。"""
@@ -167,7 +232,8 @@ def parse_claude_export(data):
             if not text:
                 continue
             speaker = {"human": "user"}.get(m.get("sender"), m.get("sender") or "")
-            entries.append(MemoryEntry(text=text, speaker=speaker, timestamp=_iso_ts(m.get("created_at")),
+            entries.append(MemoryEntry(text=text, speaker=speaker,
+                                       timestamp=_any_ts(m.get("created_at")),
                                        tags=("claude", title) if title else ("claude",)))
     return entries
 
@@ -184,7 +250,7 @@ def parse_claude_project(data):
             if not text:
                 continue
             entries.append(MemoryEntry(text=text, speaker="",
-                                       timestamp=_iso_ts(doc.get("created_at")),
+                                       timestamp=_any_ts(doc.get("created_at")),
                                        tags=("claude_project", pname, doc.get("filename") or "")))
     return entries
 
@@ -749,9 +815,56 @@ def _selftest():
                 f"抬头说 0 条、下面说「有 1 条带时间戳」，同一屏两个数打架：{out5}"
             assert rc5 == 0, "只有 mtime 不是错（是语料本身没日期），只报不红"
 
-    print("selftest ok（13项断言：六个翻译器 / 两个消费方真接上 / 分发与兜底 / "
+    # 14.【变异靶心：数字 epoch 不再被静默吞掉】2026.08.12 补，缘由是一位外部用户
+    #     的事故：导出源 58 个窗口里 48 个是 13 位毫秒戳，只解 ISO 的脚本把它们
+    #     整批吞成 unknown，97.9% 的块退到 mtime，**全程零报错**。我们 `_iso_ts`
+    #     是同一个形状（没有已知触发路径，只是没被踩到）。
+    #     ⚠ **判档分界是算出来的，不是拍的**（见 _EPOCH_* 三个常数的注释）：
+    #     1e8 秒与 1e11 毫秒同为 1973-03-03，1e11 秒与 1e14 毫秒同为 5138 年，
+    #     两档区间不重叠。**变异：把分界改成"按位数判"（13 位算毫秒）→ 下面 c、d 转红。**
+    MS = 1_752_500_000_000            # 13 位毫秒
+    SEC = 1_752_500_000.0             # 同一时刻的秒
+    #     a) 毫秒戳换算成秒，不再归 None
+    assert _epoch_ts(MS) == SEC, "13 位毫秒戳必须换算成秒——原来它掉进 except 变 None"
+    #     b) 秒戳原样留着，别被当成毫秒又除一次 1000
+    assert _epoch_ts(SEC) == SEC, "秒戳不许再除 1000"
+    #     c) 区间之外一律 None——**这个函数扩的是「认得出的形状」，不是「什么都认」**
+    assert _epoch_ts(0) is None and _epoch_ts(-SEC) is None and _epoch_ts(12345) is None, \
+        "1973 年之前的数不是这两种 epoch，不许硬认"
+    assert _epoch_ts(1e15) is None, "5138 年之后的数同理，不许硬认"
+    #     d) 纯数字字符串也认（导出里常见把时间戳写成字符串）；非数字字符串不认
+    assert _epoch_ts(str(MS)) == SEC and _epoch_ts(" 1752500000 ") == SEC
+    assert _epoch_ts("2026-07-15T00:00:00Z") is None, "ISO 串归 _iso_ts 管，_epoch_ts 不许插手"
+    #     e) bool 是 int 的子类，True 不许被当成 epoch 1
+    assert _epoch_ts(True) is None and _epoch_ts(False) is None
+    #     f) _any_ts 两条都认，且 ISO 优先
+    assert _any_ts("2026-07-15T00:00:00+00:00") == datetime(
+        2026, 7, 15, tzinfo=timezone.utc).timestamp(), "ISO 那条不许被数字路抢走"
+    assert _any_ts(MS) == SEC and _any_ts(None) is None and _any_ts("随手写的字") is None
+    #     g)【真正的靶心：两条翻译器的调用点真的换过来了】
+    #        ⚠ 只断 _epoch_ts 本身是不够的——这个函数写对了但没人调，
+    #        用户那边照样九成七落 mtime，而且**一个断言都不会红**。
+    conv14 = {"mapping": {"n1": {"message": {"author": {"role": "user"},
+                                            "create_time": MS,
+                                            "content": {"parts": ["毫秒戳的一句"]}},
+                                "parent": None}},
+              "current_node": "n1"}
+    assert parse_chatgpt_export(conv14)[0].timestamp == SEC, \
+        "ChatGPT 那支原来是**裸取 create_time**：毫秒戳会被当成秒，端出 5 万年后的日期"
+    e14 = parse_claude_export({"chat_messages": [
+        {"sender": "human", "text": "毫秒戳的一句", "created_at": MS}]})
+    assert e14[0].timestamp == SEC, "Claude 那支的 created_at 也要走 _any_ts"
+    e14p = parse_claude_project({"name": "n", "docs": [
+        {"filename": "d.md", "content": "正文", "created_at": MS}]})
+    assert e14p[0].timestamp == SEC, "projects/*.json 那支同理"
+    #     h) 原有 ISO 路径一个字没变（回归护栏）
+    assert parse_claude_export(_CLAUDE_FIXTURE)[0].timestamp is not None
+
+    print("selftest ok（14项断言：六个翻译器 / 两个消费方真接上 / 分发与兜底 / "
           "CLI 入口把 stdout 锁成 UTF-8（⚠ 变异要在 PYTHONIOENCODING=gbk 下跑，"
-          "默认 UTF-8 的机器上这条恒真）/ --stats 吃目录且报得出旧快照（⚠ 含：落 mtime 的时间戳不参与「最新停在哪天」、解析出 0 条的文件要点名报出））")
+          "默认 UTF-8 的机器上这条恒真）/ --stats 吃目录且报得出旧快照（⚠ 含：落 mtime 的时间戳不参与「最新停在哪天」、解析出 0 条的文件要点名报出）"
+          " / 数字 epoch 秒与毫秒都认且分界是算出来的（⚠ 靶心在「调用点真的换过来了」那几条，"
+          "只断 _epoch_ts 本身写对了是不够的））")
 
 
 if __name__ == "__main__":
